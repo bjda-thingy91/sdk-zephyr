@@ -30,6 +30,7 @@ static void bmm150_handle_interrupts(const void *arg)
 static K_THREAD_STACK_DEFINE(bmm150_thread_stack,
 			     CONFIG_BMM150_THREAD_STACK_SIZE);
 static struct k_thread bmm150_thread;
+static k_tid_t bmm150_thread_id;
 
 static void bmm150_thread_main(void *arg1, void *unused1, void *unused2)
 {
@@ -131,7 +132,7 @@ int bmm150_trigger_mode_init(const struct device *dev)
 
 #if defined(CONFIG_BMM150_TRIGGER_OWN_THREAD)
 	k_sem_init(&data->sem, 0, 1);
-	k_thread_create(
+	bmm150_thread_id = k_thread_create(
 		&bmm150_thread,
 		bmm150_thread_stack,
 		CONFIG_BMM150_THREAD_STACK_SIZE,
@@ -172,4 +173,16 @@ int bmm150_trigger_mode_init(const struct device *dev)
 	}
 
 	return 0;
+}
+
+int bmm150_trigger_mode_uninit(const struct device *dev)
+{
+	struct bmm150_data *data = dev->data;
+	const struct bmm150_config *cfg = dev->config;
+
+#if defined(CONFIG_BMM150_TRIGGER_OWN_THREAD)
+	k_thread_abort(bmm150_thread_id);
+#endif
+
+	return gpio_remove_callback(cfg->drdy_int.port, &data->gpio_cb);
 }

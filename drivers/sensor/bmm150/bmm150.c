@@ -8,6 +8,7 @@
  */
 
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device_runtime.h>
 #include "bmm150.h"
 
 LOG_MODULE_REGISTER(BMM150, CONFIG_SENSOR_LOG_LEVEL);
@@ -309,9 +310,15 @@ static int bmm150_sample_fetch(const struct device *dev,
 	uint16_t values[BMM150_AXIS_XYZR_MAX];
 	int16_t raw_x, raw_y, raw_z;
 	uint16_t rhall;
+	int ret;
 
 	__ASSERT_NO_MSG(chan == SENSOR_CHAN_ALL ||
 			chan == SENSOR_CHAN_MAGN_XYZ);
+
+	ret = pm_device_runtime_get(dev);
+	if (ret) {
+		return ret;
+	}
 
 	if (bmm150_reg_read(dev, BMM150_REG_X_L, (uint8_t *)values, sizeof(values)) < 0) {
 		LOG_ERR("failed to read sample");
@@ -335,7 +342,7 @@ static int bmm150_sample_fetch(const struct device *dev,
 	drv_data->sample_z = bmm150_compensate_z(&drv_data->tregs,
 							raw_z, rhall);
 
-	return 0;
+	return pm_device_runtime_put(dev);
 }
 
 /*
@@ -623,12 +630,23 @@ err_poweroff:
 	return -EIO;
 }
 
-#ifdef CONFIG_PM_DEVICE
 static int pm_action(const struct device *dev, enum pm_device_action action)
 {
-	int ret;
+	int ret = 0;
 
 	switch (action) {
+	case PM_DEVICE_ACTION_TURN_ON:
+		/* Re-Initialize Chip */
+		ret = bmm150_init_chip(dev);
+
+#ifdef CONFIG_BMM150_TRIGGER
+		if (bmm150_trigger_mode_init(dev) < 0) {
+			LOG_ERR("Cannot set up trigger mode.");
+			return -EINVAL;
+		}
+#endif
+
+		break;
 	case PM_DEVICE_ACTION_RESUME:
 		/* Need to enter sleep mode before setting OpMode to normal */
 		ret = bmm150_power_control(dev, 1);
@@ -649,13 +667,18 @@ static int pm_action(const struct device *dev, enum pm_device_action action)
 			LOG_ERR("failed to enter suspend mode: %d", ret);
 		}
 		break;
+	case PM_DEVICE_ACTION_TURN_OFF:
+#ifdef CONFIG_BMM150_TRIGGER
+		return bmm150_trigger_mode_uninit(dev);
+#else
+		return 0;
+#endif
 	default:
 		return -ENOTSUP;
 	}
 
 	return ret;
 }
-#endif
 
 static int bmm150_init(const struct device *dev)
 {
@@ -667,19 +690,8 @@ static int bmm150_init(const struct device *dev)
 		return err;
 	}
 
-	if (bmm150_init_chip(dev) < 0) {
-		LOG_ERR("failed to initialize chip");
-		return -EIO;
-	}
-
-#ifdef CONFIG_BMM150_TRIGGER
-	if (bmm150_trigger_mode_init(dev) < 0) {
-		LOG_ERR("Cannot set up trigger mode.");
-		return -EINVAL;
-	}
-#endif
-
-	return 0;
+	/* Boot according to state */
+	return pm_device_driver_init(dev, pm_action);
 }
 
 /* Initializes a struct bmm150_config for an instance on a SPI bus. */
